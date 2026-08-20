@@ -58,6 +58,13 @@ export type ContributorMetrics = {
   top1Share: number | null;
   top3Share: number | null;
   top5Share: number | null;
+  /** Human commits in the trailing year: the sample the shares are drawn from. */
+  humanCommits365d: number | null;
+  /**
+   * True when the commit sample is too small for concentration to mean
+   * anything, in which case the shares are null and the category is not scored.
+   */
+  sampleTooSmall: boolean;
   /** Which source produced these figures, because the fidelity differs. */
   source: ContributorSource;
   /**

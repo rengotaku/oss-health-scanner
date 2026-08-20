@@ -2,6 +2,7 @@ import {
   CONTRIBUTOR_RULES,
   KNOWN_AI_AGENT_LOGINS,
   KNOWN_BOT_LOGINS,
+  MIN_COMMITS_FOR_COMMUNITY,
 } from "../config";
 import type { CommitAggregation } from "../sources/ecosystems-commits";
 import type { ContributorStat, ContributorWeek } from "../sources/github";
@@ -124,6 +125,9 @@ export function computeContributorMetrics(
 
   const oneShot = humans.filter((c) => c.totalCommits === 1).length;
 
+  // Below this many commits, a "share" only restates how few commits there were.
+  const sampleTooSmall = humanTotal365 < MIN_COMMITS_FOR_COMMUNITY;
+
   const contributors: ContributorMetrics = {
     rawContributors: classified.length,
     active90d: active90.length,
@@ -135,9 +139,11 @@ export function computeContributorMetrics(
     knownAiAgents: classified.filter((c) => c.type === "KNOWN_AI_AGENT").length,
     humanUnknown: humans.length,
     oneShotRatio: humans.length > 0 ? oneShot / humans.length : null,
-    top1Share: shareOfTop(1),
-    top3Share: shareOfTop(3),
-    top5Share: shareOfTop(5),
+    top1Share: sampleTooSmall ? null : shareOfTop(1),
+    top3Share: sampleTooSmall ? null : shareOfTop(3),
+    top5Share: sampleTooSmall ? null : shareOfTop(5),
+    humanCommits365d: humanTotal365,
+    sampleTooSmall,
     source: "github_stats",
     coreMaintainersPartial: false,
   };
@@ -258,6 +264,7 @@ export function computeContributorMetricsFromCommitters(
       c.committer.commits >= CONTRIBUTOR_RULES.coreMinCommits,
   );
   const oneShot = humans.filter((c) => c.committer.commits === 1).length;
+  const sampleTooSmall = humanTotal < MIN_COMMITS_FOR_COMMUNITY;
 
   return {
     coreMaintainersPartial: true,
@@ -272,9 +279,11 @@ export function computeContributorMetricsFromCommitters(
       knownAiAgents: classified.filter((c) => c.type === "KNOWN_AI_AGENT").length,
       humanUnknown: humans.length,
       oneShotRatio: humans.length > 0 ? oneShot / humans.length : null,
-      top1Share: shareOfTop(1),
-      top3Share: shareOfTop(3),
-      top5Share: shareOfTop(5),
+      top1Share: sampleTooSmall ? null : shareOfTop(1),
+      top3Share: sampleTooSmall ? null : shareOfTop(3),
+      top5Share: sampleTooSmall ? null : shareOfTop(5),
+      humanCommits365d: humanTotal,
+      sampleTooSmall,
       source: "ecosystems_commits",
       coreMaintainersPartial: true,
     },

@@ -5,6 +5,7 @@ import {
   COMMUNITY_WEIGHTS,
   CORE_MAINTAINER_LADDER,
   EFFECTIVE_CONTRIBUTOR_LADDER,
+  MIN_COMMITS_FOR_COMMUNITY,
   FORK_SCORE_COEFFICIENT,
   MAINTENANCE_WEIGHTS,
   RELEASE_DELAY_LADDER,
@@ -122,6 +123,39 @@ export function scoreCommunity(contributors: ContributorMetrics | null): Categor
       available: false,
       unavailableReason: "Contributor statistics が取得できませんでした",
       signals: [],
+    };
+  }
+
+  /*
+   * Too few commits to characterise a community (spec 8.3 / 11.2).
+   *
+   * With a handful of commits in the year, every figure in this category is a
+   * restatement of that fact: one contributor, no repeat contributors, 100%
+   * concentration. Scoring them produced a Caution verdict for small, stable,
+   * perfectly healthy packages — chalk/ansi-styles scored 24 here on the
+   * strength of 6 commits. The honest answer is that the data does not support a
+   * community judgement, which is what N/A plus reduced coverage says.
+   *
+   * The counts stay visible; only the score is withheld.
+   */
+  if (contributors.sampleTooSmall) {
+    const commits = contributors.humanCommits365d;
+    return {
+      score: null,
+      available: false,
+      unavailableReason:
+        `直近1年の Commit が ${commits ?? 0} 件しかなく、コミュニティの厚みを評価できません` +
+        `（${MIN_COMMITS_FOR_COMMUNITY} 件以上で評価します）`,
+      signals: [
+        {
+          type: "info",
+          text: `実効 Contributor ${contributors.effectiveContributors} 人 / 直近1年の Commit ${commits ?? 0} 件`,
+        },
+        {
+          type: "info",
+          text: "小規模で変更の少ない Repository では、この値が低いことは欠陥を意味しません",
+        },
+      ],
     };
   }
 

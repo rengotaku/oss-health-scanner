@@ -60,6 +60,8 @@ const contributors: ContributorMetrics = {
   top1Share: 0.28,
   top3Share: 0.62,
   top5Share: 0.7,
+  humanCommits365d: 900,
+  sampleTooSmall: false,
   source: "github_stats",
   coreMaintainersPartial: false,
 };
@@ -265,6 +267,68 @@ describe("computeScore (spec 9)", () => {
     expect(thin.categories.community_resilience.score).toBe(
       noAgents.categories.community_resilience.score,
     );
+  });
+
+  it("does not judge a community from a handful of commits (spec 8.3 / 11.2)", () => {
+    // chalk/ansi-styles, measured 2026-08-20: 6 commits in the year produced
+    // "Top 1 share 67%" (4 of 6) and "Top 3 share 100%" (three people total),
+    // and a Community score of 24 that dragged the repository to Caution.
+    const tiny = computeScore({
+      basic,
+      contributors: {
+        ...contributors,
+        rawContributors: 21,
+        active90d: 1,
+        active365d: 3,
+        repeat365d: 1,
+        effectiveContributors: 1,
+        coreMaintainers: 0,
+        humanUnknown: 19,
+        top1Share: null,
+        top3Share: null,
+        top5Share: null,
+        humanCommits365d: 6,
+        sampleTooSmall: true,
+      },
+      activity,
+      issuePr: null,
+      release: null,
+      security,
+      now: NOW,
+    });
+
+    expect(tiny.categories.community_resilience.available).toBe(false);
+    expect(tiny.categories.community_resilience.score).toBeNull();
+    expect(tiny.categories.community_resilience.unavailableReason).toContain("6 件");
+    // The weight moves to the remaining categories rather than scoring a zero.
+    expect(tiny.coverage).toBeCloseTo(
+      1 - CATEGORY_WEIGHTS.community_resilience - CATEGORY_WEIGHTS.release_health,
+      5,
+    );
+
+    // A well-sampled repository with the same thin community is still scored:
+    // a real bus-factor-of-one finding must not be suppressed.
+    const wellSampled = computeScore({
+      basic,
+      contributors: {
+        ...contributors,
+        effectiveContributors: 1,
+        coreMaintainers: 1,
+        active365d: 4,
+        repeat365d: 1,
+        top1Share: 0.95,
+        top3Share: 1,
+        humanCommits365d: 400,
+        sampleTooSmall: false,
+      },
+      activity,
+      issuePr: null,
+      release: null,
+      security,
+      now: NOW,
+    });
+    expect(wellSampled.categories.community_resilience.available).toBe(true);
+    expect(wellSampled.categories.community_resilience.score).not.toBeNull();
   });
 
   it("scores adoption on a log curve, not linearly (spec 14.1)", () => {

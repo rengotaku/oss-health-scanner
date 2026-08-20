@@ -351,8 +351,8 @@ export async function saveMetrics(
              analysis_id, raw_contributors, active_90d, active_365d, repeat_365d,
              effective_contributors, core_maintainers, bot_contributors, known_ai_agents,
              human_unknown, one_shot_ratio, top1_share, top3_share, top5_share, source_updated_at,
-             source, core_maintainers_partial
-           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)`,
+             source, core_maintainers_partial, human_commits_365d, sample_too_small
+           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)`,
         )
         .bind(
           analysisId,
@@ -372,6 +372,8 @@ export async function saveMetrics(
           metrics.sourceUpdatedAt.contributors ?? null,
           c.source,
           c.coreMaintainersPartial ? 1 : 0,
+          c.humanCommits365d,
+          c.sampleTooSmall ? 1 : 0,
         ),
     );
   }
@@ -577,6 +579,8 @@ async function hydrate(db: D1Database, row: AnalysisRow): Promise<AnalysisRecord
           source:
             contributors.source === "github_stats" ? "github_stats" : "ecosystems_commits",
           coreMaintainersPartial: contributors.core_maintainers_partial === 1,
+          humanCommits365d: (contributors.human_commits_365d as number | null) ?? null,
+          sampleTooSmall: contributors.sample_too_small === 1,
         }
       : null,
     activity: activity

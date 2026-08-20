@@ -360,23 +360,50 @@ function CommunityPanel({ payload }: { payload: AnalysisPayload }) {
               hint="GitHub 上で Agent として識別できるアカウントのみを数えます。コード内容から AI 生成を推定することはしません。"
             />
             <Row label="Human / Unknown" value={intFmt(c.humanUnknown)} muted />
+            <Row
+              label="直近1年の Commit（人間のみ）"
+              value={intFmt(c.humanCommits365d)}
+              muted
+              hint="Top N share の分母。ここが小さいと比率は意味を持ちません。"
+            />
             <Row label="One-shot Contributor 比率" value={pctFmt(c.oneShotRatio)} muted />
-            <Row label="Top 1 contribution share" value={pctFmt(c.top1Share)} emphasis />
+            <Row
+              label="Top 1 contribution share"
+              value={pctFmt(c.top1Share)}
+              emphasis
+              hint={
+                c.sampleTooSmall
+                  ? `直近1年の Commit が ${c.humanCommits365d ?? 0} 件しかないため、比率は算出していません（比率ではなく件数の言い換えになるため）。`
+                  : undefined
+              }
+            />
             <Row
               label="Top 3 contribution share"
               value={
                 band && c.top3Share !== null ? `${pctFmt(c.top3Share)} · ${band.label}` : null
               }
               tone={band?.tone}
-              hint="Bot と明示 AI Agent の commit は分母・分子の両方から除外しています。"
+              hint={
+                c.sampleTooSmall
+                  ? `直近1年の Commit が ${c.humanCommits365d ?? 0} 件しかないため、比率は算出していません。`
+                  : "Bot と明示 AI Agent の commit は分母・分子の両方から除外しています。"
+              }
             />
             <Row label="Top 5 contribution share" value={pctFmt(c.top5Share)} muted />
           </div>
-          {c.effectiveContributors <= 2 && (
+          {c.sampleTooSmall ? (
             <p className="note">
-              Maintainer concentration is high — Contributor が少ない小規模 OSS では、これ自体が
-              「悪い OSS」を意味するわけではありません。
+              直近1年の Commit が {c.humanCommits365d ?? 0} 件のため、Community Resilience は
+              評価対象外（N/A）としています。小規模で変更の少ない Repository では、Contributor が
+              少ないことは欠陥を意味しません。
             </p>
+          ) : (
+            c.effectiveContributors <= 2 && (
+              <p className="note">
+                Maintainer concentration is high — Contributor が少ない小規模 OSS では、これ自体が
+                「悪い OSS」を意味するわけではありません。
+              </p>
+            )
           )}
         </>
       )}

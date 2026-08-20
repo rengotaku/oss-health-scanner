@@ -7,8 +7,10 @@
  */
 
 // 0.2.0 changed how the release interval is measured (see
-// RELEASE_MIN_MEDIAN_INTERVAL_DAYS), so scores are not comparable with 0.1.0.
-export const ALGORITHM_VERSION = "0.2.0";
+// RELEASE_MIN_MEDIAN_INTERVAL_DAYS). 0.3.0 stopped scoring Community
+// Resilience when the commit sample is too small to characterise a community
+// (see MIN_COMMITS_FOR_COMMUNITY). Scores are not comparable across versions.
+export const ALGORITHM_VERSION = "0.3.0";
 
 export const DAY_SECONDS = 86_400;
 
@@ -162,6 +164,23 @@ export const CONTRIBUTOR_RULES = {
  * never read as overdue.
  */
 export const RELEASE_MIN_MEDIAN_INTERVAL_DAYS = 14;
+
+/**
+ * Minimum human commits in the trailing year before contributor concentration
+ * and community size are treated as measurements rather than noise.
+ *
+ * Calibrated 2026-08-20. chalk/ansi-styles had 6 commits in the year, which the
+ * shipped model reported as "Top 1 contribution share 67%" (in fact 4 of 6) and
+ * "Top 3 share 100%" (in fact: only three people committed at all). Those are
+ * restatements of the sample size, not findings, and they dragged the repository
+ * to 53 / Caution. Spec 8.3 already says a one-or-two-contributor project must
+ * be stated as fact rather than judged; this is the threshold that enforces it.
+ *
+ * The gate is on commits, not on contributor count, deliberately:
+ * sqlite/sqlite has 1,897 commits from 4 people, and its 100% concentration is a
+ * real finding that must survive.
+ */
+export const MIN_COMMITS_FOR_COMMUNITY = 20;
 
 /** Cache TTLs in seconds (spec 18.1). */
 export const CACHE_TTL_SECONDS = {
