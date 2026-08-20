@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oss-health-scanner",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "oss-health",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Self-imposed rate limit: uncached analyses per IP per hour (spec 21.1).
+    "OSSHS_RATE_LIMIT_PER_HOUR": "10"
+  }
+  // GITHUB_TOKEN is a secret, not a var:
+  //   wrangler secret put GITHUB_TOKEN
+  // For local dev put it in .dev.vars (see .dev.vars.example).
+}

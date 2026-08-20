@@ -1,0 +1,9 @@
+# Copy to `.dev.vars` for local development. Never commit the real file.
+#
+# GitHub personal access token. No scopes are required for public repository data.
+# Unauthenticated GitHub REST allows only 60 requests/hour, which is not viable
+# for this service (spec 20.1) — the analyzer refuses to run without a token.
+GITHUB_TOKEN=
+
+# Self-imposed rate limit: uncached analyses per IP per hour (spec 21.1).
+OSSHS_RATE_LIMIT_PER_HOUR=10
