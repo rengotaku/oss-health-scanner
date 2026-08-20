@@ -6,7 +6,9 @@
  * the scoring model are expected to change.
  */
 
-export const ALGORITHM_VERSION = "0.1.0";
+// 0.2.0 changed how the release interval is measured (see
+// RELEASE_MIN_MEDIAN_INTERVAL_DAYS), so scores are not comparable with 0.1.0.
+export const ALGORITHM_VERSION = "0.2.0";
 
 export const DAY_SECONDS = 86_400;
 
@@ -144,9 +146,22 @@ export const CONTRIBUTOR_RULES = {
   repeatMinActiveWeeks: 2,
   coreMinCommits: 5,
   coreMinActiveWeeks: 3,
-  /** How many releases to sample for the median interval (spec 13.2). */
+  /** How many release *days* to sample for the median interval (spec 13.2). */
   releaseSampleSize: 6,
 } as const;
+
+/**
+ * Lower bound on the median release interval, in days.
+ *
+ * Calibrated against 27 well-known repositories on 2026-08-20. Without a floor,
+ * a project that ships several releases in quick succession gets a near-zero
+ * divisor and is then reported as thousands of times late: facebook/react
+ * measured a ratio of 141,733 and openssl 13,064, and 8 of 24 repositories
+ * landed on the floor score of 20 — the metric was reporting release frequency,
+ * not lateness. Flooring the divisor at two weeks means "recently released" can
+ * never read as overdue.
+ */
+export const RELEASE_MIN_MEDIAN_INTERVAL_DAYS = 14;
 
 /** Cache TTLs in seconds (spec 18.1). */
 export const CACHE_TTL_SECONDS = {

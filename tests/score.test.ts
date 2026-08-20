@@ -302,6 +302,58 @@ describe("computeReleaseMetrics (spec 13.2)", () => {
     expect(annual.releaseDelayRatio!).toBeLessThan(0.2);
   });
 
+  it("counts same-day releases once (spec 13.2, calibrated 2026-08-20)", () => {
+    // A monorepo tagging five packages on one day is one release event. Counting
+    // them separately drove the median interval to 0.0 days and the ratio to
+    // five figures on facebook/react, openssl and redis.
+    const burst = computeReleaseMetrics(
+      [
+        { name: "a@2", publishedAt: iso(30) },
+        { name: "b@2", publishedAt: iso(30) },
+        { name: "c@2", publishedAt: iso(30) },
+        { name: "a@1", publishedAt: iso(60) },
+        { name: "b@1", publishedAt: iso(60) },
+        { name: "c@1", publishedAt: iso(90) },
+      ],
+      NOW,
+    );
+    // Distinct days are 30/60/90 → intervals 30 and 30 → median 30.
+    expect(burst.medianIntervalDays).toBeCloseTo(30, 5);
+    expect(burst.releaseDelayRatio).toBeCloseTo(1, 5);
+    // All the releases are still listed; only the cadence collapses.
+    expect(burst.recentReleases).toHaveLength(6);
+  });
+
+  it("floors the divisor so a fresh release never reads as overdue", () => {
+    // Released today, after a burst of daily releases: the raw median interval
+    // would be 1 day, which used to make a 3-day gap look 3x late.
+    const rapid = computeReleaseMetrics(
+      [
+        { name: "v5", publishedAt: iso(3) },
+        { name: "v4", publishedAt: iso(4) },
+        { name: "v3", publishedAt: iso(5) },
+        { name: "v2", publishedAt: iso(6) },
+        { name: "v1", publishedAt: iso(7) },
+      ],
+      NOW,
+    );
+    expect(rapid.medianIntervalDays).toBe(14);
+    expect(rapid.releaseDelayRatio!).toBeLessThan(1);
+  });
+
+  it("leaves a slow-cadence project's ratio untouched by the floor", () => {
+    const annual = computeReleaseMetrics(
+      [
+        { name: "v3", publishedAt: iso(400) },
+        { name: "v2", publishedAt: iso(760) },
+        { name: "v1", publishedAt: iso(1130) },
+      ],
+      NOW,
+    );
+    expect(annual.medianIntervalDays!).toBeGreaterThan(300);
+    expect(annual.releaseDelayRatio!).toBeCloseTo(400 / annual.medianIntervalDays!, 5);
+  });
+
   it("refuses to compute a ratio from too little history", () => {
     const two = computeReleaseMetrics(
       [
