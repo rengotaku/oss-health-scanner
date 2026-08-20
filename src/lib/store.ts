@@ -10,6 +10,7 @@ import type {
   AnalysisRecord,
   AnalysisStatus,
   ContributorMetrics,
+  Diagnostics,
   Freshness,
   IssuePrMetrics,
   ReleaseMetrics,
@@ -272,6 +273,7 @@ export async function finishAnalysis(
     scores: ScoreResult | null;
     freshness: Freshness;
     unavailable: SourceName[];
+    diagnostics: Diagnostics;
     completedAt: string;
   },
 ): Promise<void> {
@@ -293,8 +295,9 @@ export async function finishAnalysis(
          freshness_json = ?12,
          unavailable_json = ?13,
          completed_at = ?14,
+         diagnostics_json = ?15,
          lock_expires_at = NULL
-       WHERE id = ?15`,
+       WHERE id = ?16`,
     )
     .bind(
       args.status,
@@ -320,6 +323,7 @@ export async function finishAnalysis(
       JSON.stringify(args.freshness),
       JSON.stringify(args.unavailable),
       args.completedAt,
+      JSON.stringify(args.diagnostics),
       args.analysisId,
     )
     .run();
@@ -346,8 +350,9 @@ export async function saveMetrics(
           `INSERT OR REPLACE INTO contributor_metrics (
              analysis_id, raw_contributors, active_90d, active_365d, repeat_365d,
              effective_contributors, core_maintainers, bot_contributors, known_ai_agents,
-             human_unknown, one_shot_ratio, top1_share, top3_share, top5_share, source_updated_at
-           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)`,
+             human_unknown, one_shot_ratio, top1_share, top3_share, top5_share, source_updated_at,
+             source, core_maintainers_partial
+           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)`,
         )
         .bind(
           analysisId,
@@ -365,6 +370,8 @@ export async function saveMetrics(
           c.top3Share,
           c.top5Share,
           metrics.sourceUpdatedAt.contributors ?? null,
+          c.source,
+          c.coreMaintainersPartial ? 1 : 0,
         ),
     );
   }
@@ -375,8 +382,8 @@ export async function saveMetrics(
         .prepare(
           `INSERT OR REPLACE INTO activity_metrics (
              analysis_id, commits_30d, commits_90d, commits_365d, commits_prev_90d,
-             active_weeks_365d, last_commit_at, source_updated_at
-           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)`,
+             active_weeks_365d, last_commit_at, source_updated_at, source
+           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`,
         )
         .bind(
           analysisId,
@@ -387,6 +394,7 @@ export async function saveMetrics(
           a.activeWeeks365d,
           a.lastCommitAt,
           metrics.sourceUpdatedAt.activity ?? null,
+          a.source,
         ),
     );
   }
@@ -476,6 +484,7 @@ type AnalysisRow = {
   reasons_json: string | null;
   freshness_json: string | null;
   unavailable_json: string | null;
+  diagnostics_json: string | null;
   error_code: string | null;
   started_at: string;
   basic_ready_at: string | null;
@@ -519,7 +528,7 @@ async function hydrate(db: D1Database, row: AnalysisRow): Promise<AnalysisRecord
   if (!repo) throw new Error(`analysis ${row.id} references a missing repository`);
 
   const [contributors, activity, issuePr, release, security] = await Promise.all([
-    db.prepare("SELECT * FROM contributor_metrics WHERE analysis_id = ?1").bind(row.id).first<Record<string, number | null>>(),
+    db.prepare("SELECT * FROM contributor_metrics WHERE analysis_id = ?1").bind(row.id).first<Record<string, unknown>>(),
     db.prepare("SELECT * FROM activity_metrics WHERE analysis_id = ?1").bind(row.id).first<Record<string, unknown>>(),
     db.prepare("SELECT * FROM issue_pr_metrics WHERE analysis_id = ?1").bind(row.id).first<Record<string, number | null>>(),
     db.prepare("SELECT * FROM release_metrics WHERE analysis_id = ?1").bind(row.id).first<Record<string, unknown>>(),
@@ -553,7 +562,7 @@ async function hydrate(db: D1Database, row: AnalysisRow): Promise<AnalysisRecord
     contributors: contributors
       ? {
           rawContributors: num(contributors.raw_contributors),
-          active90d: num(contributors.active_90d),
+          active90d: (contributors.active_90d as number | null) ?? null,
           active365d: num(contributors.active_365d),
           repeat365d: num(contributors.repeat_365d),
           effectiveContributors: num(contributors.effective_contributors),
@@ -561,20 +570,29 @@ async function hydrate(db: D1Database, row: AnalysisRow): Promise<AnalysisRecord
           botContributors: num(contributors.bot_contributors),
           knownAiAgents: num(contributors.known_ai_agents),
           humanUnknown: num(contributors.human_unknown),
-          oneShotRatio: contributors.one_shot_ratio ?? null,
-          top1Share: contributors.top1_share ?? null,
-          top3Share: contributors.top3_share ?? null,
-          top5Share: contributors.top5_share ?? null,
+          oneShotRatio: (contributors.one_shot_ratio as number | null) ?? null,
+          top1Share: (contributors.top1_share as number | null) ?? null,
+          top3Share: (contributors.top3_share as number | null) ?? null,
+          top5Share: (contributors.top5_share as number | null) ?? null,
+          source:
+            contributors.source === "github_stats" ? "github_stats" : "ecosystems_commits",
+          coreMaintainersPartial: contributors.core_maintainers_partial === 1,
         }
       : null,
     activity: activity
       ? {
-          commits30d: num(activity.commits_30d),
-          commits90d: num(activity.commits_90d),
-          commits365d: num(activity.commits_365d),
-          commitsPrev90d: num(activity.commits_prev_90d),
-          activeWeeks365d: num(activity.active_weeks_365d),
+          commits30d: (activity.commits_30d as number | null) ?? null,
+          commits90d: (activity.commits_90d as number | null) ?? null,
+          commits365d: (activity.commits_365d as number | null) ?? null,
+          commitsPrev90d: (activity.commits_prev_90d as number | null) ?? null,
+          activeWeeks365d: (activity.active_weeks_365d as number | null) ?? null,
           lastCommitAt: (activity.last_commit_at as string | null) ?? null,
+          source:
+            activity.source === "github_stats"
+              ? "github_stats"
+              : activity.source === "ecosystems_commits"
+                ? "ecosystems_commits"
+                : "github_commit_activity",
         }
       : null,
     issuePr: issuePr
@@ -617,6 +635,9 @@ async function hydrate(db: D1Database, row: AnalysisRow): Promise<AnalysisRecord
         }
       : null,
     freshness: row.freshness_json ? (JSON.parse(row.freshness_json) as Freshness) : {},
+    diagnostics: row.diagnostics_json
+      ? (JSON.parse(row.diagnostics_json) as Diagnostics)
+      : {},
     unavailable: row.unavailable_json
       ? (JSON.parse(row.unavailable_json) as SourceName[])
       : [],

@@ -32,7 +32,7 @@ for (const [name, width, height] of sizes) {
   await page.goto(`${base}/`, { waitUntil: "networkidle" });
   await page.screenshot({ path: `${out}/${prefix}home-${name}.png`, fullPage: true });
 
-  await page.goto(`${base}/repo/ggerganov/llama.cpp`, { waitUntil: "networkidle" });
+  await page.goto(`${base}/repo/curl/curl`, { waitUntil: "networkidle" });
   await page.waitForSelector(".verdict__value", { timeout: 15000 });
   await page.screenshot({ path: `${out}/${prefix}report-${name}.png`, fullPage: true });
 

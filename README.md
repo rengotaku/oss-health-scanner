@@ -21,7 +21,7 @@ Next.js on Cloudflare Workers
    ├── D1        repositories / analyses / metrics / rate limit / counters
    ├── Cache API 外部 API レスポンスのソース別 TTL
    ├── GitHub REST API   （現在値の source of truth）
-   ├── ecosyste.ms       （Issue / PR 履歴の集約）
+   ├── ecosyste.ms       （commit / Issue / PR 履歴の集約。Contributor 指標の主ソース）
    ├── OpenSSF Scorecard （セキュリティ開発プロセス評価）
    └── deps.dev          （Package 対応が高信頼で特定できる場合のみ）
 ```
@@ -55,6 +55,15 @@ make run              # http://localhost:3210
 
 秘密は `pass` に置き、`make dev-vars` が実行時に `.dev.vars`（gitignore 済み）へ書き出す。
 `make clean-secrets` で消える。production では `wrangler secret put GITHUB_TOKEN`。
+
+### ローカル開発の注意点（実測で踏んだもの）
+
+- **dev サーバ稼働中に `wrangler d1 execute --local` を実行しない**。同じ SQLite に別プロセスから
+  書いても dev サーバ側に反映されず、消したはずのキャッシュが生き続ける。状態をリセットするなら
+  サーバを止めて `rm -rf .wrangler/state && make migrate`
+- **health stage（`ctx.waitUntil` 側）の `console` 出力は `next dev` の stdout に出ない**。
+  どのソースがどう失敗したかは `GET /api/v1/repos/{owner}/{repo}` の `diagnostics` を見る
+  （ソース別に `ok` / `empty` / `pending` / `too_large` / `error` を記録している）
 
 ### 画面だけ確認したいとき
 
@@ -126,12 +135,79 @@ Score とは別に `ACTIVE` / `LOW_CHANGE` / `STALE` / `ARCHIVED` / `INDETERMINA
 deps.dev が単一の package identity を返すときだけ表示し、それ以外は
 `Package security data: unavailable` にする。誤った Package の脆弱性を出す方が危険なため。
 
+**Contributor 指標の主ソースは GitHub ではなく ecosyste.ms**
+
+仕様書 §20.3 は GitHub の `stats/contributors` を 1〜4 リクエストの主力として設計しているが、
+実測（2026-08-20）でその前提が成立しないことが分かった。
+
+| Repository | `stats/contributors` |
+|---|---|
+| chalk/ansi-styles | 数十 KB（利用可能） |
+| vitejs/vite | 3.1 MB |
+| kubernetes/kubernetes | 29 MB |
+| curl/curl | 24.8 MB（gzip 展開後） |
+| torvalds/linux | 71 MB |
+| curl/curl・facebook/react 等 | `202 Accepted` が 8 秒の予算内で解消しないことがある |
+
+Worker は isolate メモリ 128 MB と CPU 時間の制約があり、この規模は parse できない。加えて
+`content-length` はレスポンスが gzip かつ chunked のため **null** で、ヘッダによるサイズ判定は
+機能しない（デコード済みバイト数をストリームで数える必要がある）。
+
+そこで **`commits.ecosyste.ms` の集約値を Contributor 指標の主ソース**にし、GitHub の週次統計は
+「安価に読めたときだけ使う高精度版」に降格した。ecosyste.ms はリポジトリ規模に依らず数百 KB で、
+`past_year_committers[]`（login + commit 数）・bot 判定・DDS を返す。これは仕様書 §3.1 / §20.3 が
+ecosyste.ms に与えている役割（GitHub の全履歴 Pagination を避ける履歴集約）を commit へ広げたもの。
+
+代償として、ecosyste.ms 経路では **90日窓と Contributor ごとの活動週が取得できない**。これらは
+0 ではなく N/A として表示し、Core Maintainer は「Commit 数のみで判定」と明示する。
+どちらのソースを使ったかは `contributor_metrics.source` に保存する。
+
+**Raw Contributor は GitHub 単体では正しく出ない**
+
+`stats/contributors` は上位 100 人で打ち切られる。実測で 30 リポジトリ中 8 件が
+「ちょうど 100」を返し（vuejs/core・tokio・flask・requests・express・lodash・jquery・moment）、
+ecosyste.ms の実数（curl 1,516 / rust-lang/rust 7,723）と混在すると比較不能になる。
+そのため Raw Contributor は ecosyste.ms の総数が取れる場合は必ずそちらを使う。
+
+**OpenSSF の `-1` は低評価ではない（判定不能）**
+
+Scorecard は判定できなかった check を `-1` で返す。これを低スコアとして扱うと、評価されて
+いない項目を「Weak」と報告してしまう（curl/curl の Branch-Protection・CI-Tests・Packaging が該当）。
+`-1` は null に正規化し、N/A として表示する。欠損を 0 点にしないという §9.3 の原則と同じ扱い。
+
 **GitHub の呼び出し回数を予算として強制する（§20.3）**
 1 Repository あたり typical 8 / hard cap 12。cap は `GithubClient` 側で強制していて、
 超えると例外になる（後から集計するだけでは、ページネーションの事故が静かに quota を食う）。
-contributor statistics 1 本から Raw contributor 数・commit 窓・活動週・bot 判定まで
-まとめて取ることで予算内に収めている。`GET /api/v1/metrics` で
+Contributor 指標を ecosyste.ms（GitHub の quota を消費しない）に寄せているため、GitHub への
+呼び出しは repository metadata / releases / commit_activity / contributor statistics の 4 系統に
+収まる。実測は 6.4 requests / uncached analysis。`GET /api/v1/metrics` で
 `github_requests_per_analysis` を確認できる。
+
+## キャリブレーション（Risk 1 / 2 / 6 / 7）
+
+有名 OSS 30 件を実解析した結果は `dev/calibrate.mjs` で再現できる（`make run` 後に
+`node dev/calibrate.mjs --out out.json`）。2026-08-20 時点の実測:
+
+- **GitHub API 呼び出し数 = 6.4 requests / uncached analysis**。§20.3 の typical 8 以内（Risk 6）
+- 403 / 429 はゼロ
+- **PARTIAL 率 82%**。大半は「Contributor 指標が ecosyste.ms 経路（90日窓なし）」か
+  「GitHub 統計が 202」で、障害ではない。PARTIAL が常態なので、この状態を「一部欠損」以上の
+  意味に使わないこと
+- Score の分布は 40〜91 に収まり、`Excellent` は microsoft/vscode（91）のみ
+
+### 未解決: Release Health の閾値が高頻度リリースを不当に減点する（Risk 1）
+
+Release score が最低値 20 になったのは **24 件中 10 件**（facebook/react・kubernetes・vitejs/vite・
+prettier・redis・openssl・bootstrap・express・requests・tokio）。数日おきにリリースするリポジトリでは
+直近 6 件から出す間隔中央値が極端に小さくなり、10 日空くだけで「中央値の 3 倍以上の遅延」と
+判定される。仕様書 §13.3 の比率設計は月次〜年次のリリース間隔を想定しており、
+サブ週次のリポジトリには効かない。
+
+考えられる直し方（未適用。スコアモデルの変更なので `algorithm_version` の更新を伴う）:
+
+1. 間隔中央値に下限を置く（例: 14 日未満は 14 日として扱う）
+2. 直近 6 件ではなく「直近1年のリリース全件」から中央値を取る
+3. 高頻度リリースのリポジトリでは Release Health を N/A にする
 
 ## API
 

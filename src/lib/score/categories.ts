@@ -71,11 +71,16 @@ export function scoreMaintenance(
   // Continuity, not volume: spec 10.2 explicitly rejects "more commits is
   // better", so this measures how many weeks saw activity, capped at 1.
   let continuity: number | null = null;
-  if (activity) {
+  if (activity && activity.activeWeeks365d !== null) {
     continuity = clamp((activity.activeWeeks365d / 52) * 100);
     signals.push({
       type: activity.activeWeeks365d >= 26 ? "positive" : "info",
       text: `過去52週のうち ${activity.activeWeeks365d} 週で活動`,
+    });
+  } else if (activity) {
+    signals.push({
+      type: "info",
+      text: "週次の活動分布は未取得（GitHub の統計が生成中のため）",
     });
   }
 
@@ -156,7 +161,9 @@ export function scoreCommunity(contributors: ContributorMetrics | null): Categor
   const coreScore = scoreByMax(CORE_MAINTAINER_LADDER, "max", contributors.coreMaintainers);
   signals.push({
     type: contributors.coreMaintainers >= 2 ? "positive" : "warning",
-    text: `Core Maintainer ${contributors.coreMaintainers} 人`,
+    text:
+      `Core Maintainer ${contributors.coreMaintainers} 人` +
+      (contributors.coreMaintainersPartial ? "（Commit 数のみで判定・活動週は未取得）" : ""),
   });
 
   // Spec 7.5: the presence of AI agents is not penalised. Only the combination
@@ -206,7 +213,8 @@ export function scoreSecurity(security: SecurityMetrics | null): CategoryResult 
   ];
 
   for (const check of security.openssfChecks) {
-    if (check.score !== null && check.score <= 2) {
+    // `null` means the check was inconclusive, not that it scored badly.
+    if (check.score !== null && check.score >= 0 && check.score <= 2) {
       signals.push({ type: "warning", text: `OpenSSF ${check.name} が低評価（${check.score}/10）` });
     }
   }

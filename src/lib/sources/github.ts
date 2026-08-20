@@ -2,9 +2,11 @@ import {
   CACHE_TTL_SECONDS,
   ENDPOINTS,
   GITHUB_REQUEST_BUDGET,
+  STATS_MAX_BYTES,
   STATS_RETRY_DELAYS_MS,
   STATS_TOTAL_BUDGET_MS,
   TIMEOUTS_MS,
+  USER_AGENT,
 } from "../config";
 import { fetchJson, HttpError, Semaphore } from "../http";
 import type { RepoRef, RepositoryBasic } from "../types";
@@ -234,82 +236,221 @@ export class GithubClient {
   }
 
   /**
-   * Weekly commit counts per contributor.
+   * Weekly commit counts per contributor — used only when the body is small
+   * enough to read.
    *
-   * This single endpoint is what makes the request budget work: it yields raw
-   * contributor count, per-contributor commit totals, active weeks and the
-   * commit windows in one call, and it carries GitHub's own account `type` so
-   * bot classification needs no extra lookups.
+   * This endpoint is the only source carrying weekly buckets and GitHub account
+   * types, but it returns every contributor's complete history. Measured
+   * 2026-08-20 with gzip negotiated, curl/curl decodes to 24.8 MB and
+   * torvalds/linux is larger still; a Worker cannot hold that. The body is
+   * therefore read as a stream and abandoned the moment it crosses
+   * `STATS_MAX_BYTES`, and the caller falls back to the ecosyste.ms aggregation.
    *
-   * GitHub answers `202 Accepted` while it computes the statistics (spec 19.2).
-   * Retries are bounded by both a schedule and a total wall-clock budget; on
-   * expiry the caller degrades to a partial result rather than failing the page.
+   * The size cannot be predicted from `content-length`: these responses arrive
+   * gzip-encoded and chunked, so the header is absent. Counting decoded bytes as
+   * they arrive is the only guard that actually holds.
+   *
+   * `202 Accepted` means GitHub is still computing (spec 19.2).
    */
   async getContributorStats(
     ref: RepoRef,
-  ): Promise<{ stats: ContributorStat[] | null; fetchedAt: string; pending: boolean }> {
+  ): Promise<{
+    stats: ContributorStat[] | null;
+    fetchedAt: string;
+    pending: boolean;
+    tooLarge: boolean;
+    bytes: number | null;
+  }> {
+    const result = await this.getStatsBody(`/repos/${ref.owner}/${ref.repo}/stats/contributors`);
+    if (result.kind === "too_large") {
+      return {
+        stats: null,
+        fetchedAt: result.fetchedAt,
+        pending: false,
+        tooLarge: true,
+        bytes: result.bytes,
+      };
+    }
+    if (result.kind === "pending") {
+      return { stats: null, fetchedAt: result.fetchedAt, pending: true, tooLarge: false, bytes: null };
+    }
+    if (result.kind === "empty") {
+      return { stats: [], fetchedAt: result.fetchedAt, pending: false, tooLarge: false, bytes: 0 };
+    }
+
+    const raw = JSON.parse(result.text) as RawContributorStat[] | null;
+    if (!Array.isArray(raw)) {
+      return { stats: null, fetchedAt: result.fetchedAt, pending: true, tooLarge: false, bytes: null };
+    }
+
+    const stats: ContributorStat[] = raw
+      .filter((entry) => entry.author?.login)
+      .map((entry) => ({
+        login: entry.author!.login!,
+        githubUserId: entry.author!.id ?? null,
+        accountType: entry.author!.type ?? null,
+        total: entry.total,
+        weeks: entry.weeks.map((w) => ({ w: w.w, c: w.c })),
+      }));
+    return {
+      stats,
+      fetchedAt: result.fetchedAt,
+      pending: false,
+      tooLarge: false,
+      bytes: result.bytes,
+    };
+  }
+
+  /**
+   * 52 weeks of repository-wide commit totals (~3 KB).
+   *
+   * This is the activity source for every repository, so it gets the same
+   * bounded 202 retry as the contributor statistics: without it, a repository
+   * whose statistics GitHub happens to be recomputing loses its activity
+   * numbers entirely on the first visit.
+   */
+  async getCommitActivity(
+    ref: RepoRef,
+  ): Promise<{ weeks: ContributorWeek[] | null; fetchedAt: string }> {
+    const result = await this.getStatsBody(
+      `/repos/${ref.owner}/${ref.repo}/stats/commit_activity`,
+    );
+    if (result.kind !== "ok") return { weeks: null, fetchedAt: result.fetchedAt };
+
+    const raw = JSON.parse(result.text) as { week: number; total: number }[] | null;
+    if (!Array.isArray(raw)) return { weeks: null, fetchedAt: result.fetchedAt };
+    return {
+      weeks: raw.map((entry) => ({ w: entry.week, c: entry.total })),
+      fetchedAt: result.fetchedAt,
+    };
+  }
+
+  /**
+   * Fetches a `stats/*` endpoint with the 202 retry schedule and a hard cap on
+   * how many decoded bytes will be accumulated.
+   */
+  private async getStatsBody(path: string): Promise<
+    | { kind: "ok"; text: string; bytes: number; fetchedAt: string }
+    | { kind: "too_large"; bytes: number; fetchedAt: string }
+    | { kind: "pending"; fetchedAt: string }
+    | { kind: "empty"; fetchedAt: string }
+  > {
     const startedAt = Date.now();
     let lastFetchedAt = new Date().toISOString();
 
     for (let attempt = 0; attempt < STATS_RETRY_DELAYS_MS.length; attempt += 1) {
       const delay = STATS_RETRY_DELAYS_MS[attempt]!;
-      const elapsed = Date.now() - startedAt;
       if (delay > 0) {
-        if (elapsed + delay > STATS_TOTAL_BUDGET_MS) break;
+        if (Date.now() - startedAt + delay > STATS_TOTAL_BUDGET_MS) break;
         await sleep(delay);
       }
 
-      const { data, status, fetchedAt } = await this.request<RawContributorStat[]>(
-        `/repos/${ref.owner}/${ref.repo}/stats/contributors`,
-        {
-          timeoutMs: TIMEOUTS_MS.githubStats,
-          cacheTtlSeconds: CACHE_TTL_SECONDS.health,
-          // 202 = still computing. 204 = no content (empty repository).
-          acceptStatus: [202, 204],
-        },
-      );
-      lastFetchedAt = fetchedAt;
+      if (this.usage.requests >= GITHUB_REQUEST_BUDGET.hardCap) {
+        throw new GithubBudgetExceededError(this.usage.requests);
+      }
+      this.usage.requests += 1;
 
-      if (status === 204) return { stats: [], fetchedAt, pending: false };
-      if (status === 202 || data === null) continue;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUTS_MS.githubStats);
+      try {
+        const response = await githubSemaphore.run(() =>
+          fetch(`${ENDPOINTS.github}${path}`, {
+            headers: {
+              authorization: `Bearer ${this.token}`,
+              accept: "application/vnd.github+json",
+              "x-github-api-version": "2022-11-28",
+              "user-agent": USER_AGENT,
+            },
+            signal: controller.signal,
+          }),
+        );
+        lastFetchedAt = new Date().toISOString();
 
-      const stats: ContributorStat[] = data
-        .filter((entry) => entry.author?.login)
-        .map((entry) => ({
-          login: entry.author!.login!,
-          githubUserId: entry.author!.id ?? null,
-          accountType: entry.author!.type ?? null,
-          total: entry.total,
-          weeks: entry.weeks.map((w) => ({ w: w.w, c: w.c })),
-        }));
-      return { stats, fetchedAt, pending: false };
+        const remaining = response.headers.get("x-ratelimit-remaining");
+        if (remaining !== null) this.usage.rateLimitRemaining = Number(remaining);
+        if (response.status === 403) this.usage.count403 += 1;
+        if (response.status === 429) this.usage.count429 += 1;
+
+        if (response.status === 404) throw new RepositoryNotFoundError();
+        if (response.status === 429 || response.status === 403) {
+          throw new GithubRateLimitedError(response.status);
+        }
+        if (response.status === 204) {
+          await cancel(response);
+          return { kind: "empty", fetchedAt: lastFetchedAt };
+        }
+        if (response.status === 202) {
+          await cancel(response);
+          continue;
+        }
+        if (!response.ok || !response.body) {
+          // Worth logging: a repeatedly unusable statistics endpoint is the
+          // difference between "no contributor data" and "a bug here".
+          console.warn("github stats attempt unusable", {
+            path,
+            status: response.status,
+            hasBody: response.body !== null,
+          });
+          await cancel(response);
+          continue;
+        }
+
+        const read = await readCapped(response.body, STATS_MAX_BYTES);
+        if (read.exceeded) {
+          controller.abort();
+          return { kind: "too_large", bytes: read.bytes, fetchedAt: lastFetchedAt };
+        }
+        return { kind: "ok", text: read.text, bytes: read.bytes, fetchedAt: lastFetchedAt };
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
-    return { stats: null, fetchedAt: lastFetchedAt, pending: true };
-  }
-
-  /**
-   * 52 weeks of repository-wide commit counts. Used only when contributor
-   * statistics are still pending, so activity numbers can still be shown.
-   */
-  async getCommitActivity(
-    ref: RepoRef,
-  ): Promise<{ weeks: ContributorWeek[] | null; fetchedAt: string }> {
-    const { data, status, fetchedAt } = await this.request<
-      { week: number; total: number }[]
-    >(`/repos/${ref.owner}/${ref.repo}/stats/commit_activity`, {
-      timeoutMs: TIMEOUTS_MS.githubStats,
-      cacheTtlSeconds: CACHE_TTL_SECONDS.health,
-      acceptStatus: [202, 204],
-    });
-    if (status === 202 || data === null) return { weeks: null, fetchedAt };
-    return {
-      weeks: data.map((entry) => ({ w: entry.week, c: entry.total })),
-      fetchedAt,
-    };
+    return { kind: "pending", fetchedAt: lastFetchedAt };
   }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function cancel(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
+/**
+ * Reads a body until `maxBytes` decoded bytes have arrived, then stops.
+ *
+ * The cap has to be enforced while reading rather than from `content-length`:
+ * GitHub's statistics responses are gzip-encoded and chunked, so the header is
+ * absent and the decoded size is unknown until it arrives. Buffering first and
+ * checking afterwards is exactly the failure this avoids — a 25 MB body would
+ * already be in memory by then.
+ */
+async function readCapped(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<{ text: string; bytes: number; exceeded: boolean }> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let bytes = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { text: "", bytes, exceeded: true };
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return { text: chunks.join(""), bytes, exceeded: false };
+  } finally {
+    reader.releaseLock?.();
+  }
 }

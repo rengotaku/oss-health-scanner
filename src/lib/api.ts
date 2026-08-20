@@ -87,6 +87,7 @@ export function serializeAnalysis(record: AnalysisRecord, cached: boolean): unkn
     release: record.release,
     security: record.security,
     freshness: record.freshness,
+    diagnostics: record.diagnostics,
     unavailable: record.unavailable,
     started_at: record.startedAt,
     basic_ready_at: record.basicReadyAt,

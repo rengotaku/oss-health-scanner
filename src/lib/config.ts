@@ -160,7 +160,9 @@ export const CACHE_TTL_SECONDS = {
 /** Timeouts in milliseconds (spec 21.4). */
 export const TIMEOUTS_MS = {
   githubBasic: 3_000,
-  githubStats: 3_000,
+  // Enough to read a few MB of gzip-encoded statistics; the byte cap, not the
+  // clock, is what protects memory.
+  githubStats: 6_000,
   externalEnrichment: 3_000,
 } as const;
 
@@ -170,6 +172,19 @@ export const TIMEOUTS_MS = {
  */
 export const STATS_RETRY_DELAYS_MS = [0, 1_000, 3_000, 7_000] as const;
 export const STATS_TOTAL_BUDGET_MS = 8_000;
+
+/**
+ * Hard cap on the `stats/contributors` response body.
+ *
+ * Measured 2026-08-20: the endpoint returns every contributor's full weekly
+ * history, which is 3.1 MB for vitejs/vite, 8.1 MB for expressjs/express,
+ * 29 MB for kubernetes/kubernetes, 62 MB for curl/curl and 71 MB for
+ * torvalds/linux. A Cloudflare Worker has 128 MB of isolate memory and a CPU
+ * time limit, so anything in that upper range cannot be parsed at all. Above
+ * this cap the response is abandoned unread and contributor metrics come from
+ * the ecosyste.ms aggregation instead.
+ */
+export const STATS_MAX_BYTES = 4 * 1024 * 1024;
 
 /** GitHub request budget per uncached analysis (spec 20.3). */
 export const GITHUB_REQUEST_BUDGET = { typical: 8, hardCap: 12 } as const;

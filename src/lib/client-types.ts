@@ -62,6 +62,7 @@ export type AnalysisPayload = {
   release: ReleaseMetrics | null;
   security: SecurityMetrics | null;
   freshness: Freshness;
+  diagnostics: Record<string, { outcome: string; detail?: string }>;
   unavailable: SourceName[];
   started_at: string;
   basic_ready_at: string | null;

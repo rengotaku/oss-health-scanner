@@ -49,7 +49,10 @@ export async function fetchScorecard(ref: RepoRef): Promise<OpenssfResult | null
     )
     .map((c) => ({
       name: c.name,
-      score: typeof c.score === "number" ? c.score : null,
+      // OpenSSF uses -1 for "could not determine", which is not a low score.
+      // Treating it as 0-ish would report a check as failing when it was never
+      // evaluated — the same mistake as scoring a missing category as zero.
+      score: typeof c.score === "number" && c.score >= 0 ? c.score : null,
       reason: c.reason ?? null,
     }));
 

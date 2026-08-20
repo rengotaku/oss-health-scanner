@@ -45,7 +45,8 @@ export type RepositoryBasic = {
 
 export type ContributorMetrics = {
   rawContributors: number;
-  active90d: number;
+  /** Null when the source has no 90-day window (see `contributorSource`). */
+  active90d: number | null;
   active365d: number;
   repeat365d: number;
   effectiveContributors: number;
@@ -57,16 +58,44 @@ export type ContributorMetrics = {
   top1Share: number | null;
   top3Share: number | null;
   top5Share: number | null;
+  /** Which source produced these figures, because the fidelity differs. */
+  source: ContributorSource;
+  /**
+   * True when Core Maintainer applied the commit threshold only, because the
+   * per-contributor active-weeks figure was unavailable (spec 6.5).
+   */
+  coreMaintainersPartial: boolean;
 };
 
+/**
+ * `github_stats` carries weekly buckets and GitHub account types, but its
+ * payload reaches tens of MB on large repositories, so it is only used when
+ * cheap. `ecosystems_commits` is the pre-aggregated fallback used otherwise.
+ */
+export type ContributorSource = "github_stats" | "ecosystems_commits";
+
+/**
+ * Activity figures. Every count is nullable because the sources differ in what
+ * they can answer: GitHub's weekly statistics give all of them, but they are
+ * frequently unavailable (persistent `202 Accepted` on busy repositories,
+ * observed on curl/curl on 2026-08-20), and the ecosyste.ms fallback carries a
+ * past-year total with no shorter windows and no per-week breakdown. A missing
+ * window is reported as N/A, never as 0.
+ */
 export type ActivityMetrics = {
-  commits30d: number;
-  commits90d: number;
-  commits365d: number;
-  commitsPrev90d: number;
-  activeWeeks365d: number;
+  commits30d: number | null;
+  commits90d: number | null;
+  commits365d: number | null;
+  commitsPrev90d: number | null;
+  activeWeeks365d: number | null;
   lastCommitAt: string | null;
+  source: ActivitySource;
 };
+
+export type ActivitySource =
+  | "github_stats"
+  | "github_commit_activity"
+  | "ecosystems_commits";
 
 export type IssuePrMetrics = {
   totalIssues: number | null;
@@ -136,6 +165,14 @@ export type SourceName = "github" | "ecosystems" | "openssf" | "deps_dev";
 
 export type Freshness = Partial<Record<SourceName | "score", string>>;
 
+/** What happened with one upstream call, for the "why is this N/A" question. */
+export type SourceDiagnostic = {
+  outcome: "ok" | "empty" | "pending" | "too_large" | "error";
+  detail?: string;
+};
+
+export type Diagnostics = Record<string, SourceDiagnostic>;
+
 export type AnalysisRecord = {
   analysisId: string;
   status: AnalysisStatus;
@@ -147,6 +184,7 @@ export type AnalysisRecord = {
   release: ReleaseMetrics | null;
   security: SecurityMetrics | null;
   freshness: Freshness;
+  diagnostics: Diagnostics;
   unavailable: SourceName[];
   cached: boolean;
   startedAt: string;

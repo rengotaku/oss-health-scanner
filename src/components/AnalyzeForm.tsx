@@ -5,8 +5,8 @@ import { useState, useTransition } from "react";
 import { NORMALIZE_MESSAGE, normalizeRepoUrl } from "@/lib/url";
 
 const SAMPLES = [
-  "https://github.com/ggerganov/llama.cpp",
-  "https://github.com/sindresorhus/is-odd",
+  "https://github.com/curl/curl",
+  "https://github.com/chalk/ansi-styles",
   "https://github.com/facebook/react",
 ];
 

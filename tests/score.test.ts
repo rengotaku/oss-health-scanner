@@ -43,6 +43,7 @@ const activity: ActivityMetrics = {
   commitsPrev90d: 220,
   activeWeeks365d: 47,
   lastCommitAt: iso(2),
+  source: "github_stats",
 };
 
 const contributors: ContributorMetrics = {
@@ -59,6 +60,8 @@ const contributors: ContributorMetrics = {
   top1Share: 0.28,
   top3Share: 0.62,
   top5Share: 0.7,
+  source: "github_stats",
+  coreMaintainersPartial: false,
 };
 
 const security: SecurityMetrics = {

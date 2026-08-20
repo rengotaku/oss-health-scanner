@@ -3,6 +3,7 @@ import {
   KNOWN_AI_AGENT_LOGINS,
   KNOWN_BOT_LOGINS,
 } from "../config";
+import type { CommitAggregation } from "../sources/ecosystems-commits";
 import type { ContributorStat, ContributorWeek } from "../sources/github";
 import type { ActivityMetrics, ContributorMetrics, ContributorType } from "../types";
 
@@ -137,6 +138,8 @@ export function computeContributorMetrics(
     top1Share: shareOfTop(1),
     top3Share: shareOfTop(3),
     top5Share: shareOfTop(5),
+    source: "github_stats",
+    coreMaintainersPartial: false,
   };
 
   const allWeeks = stats.flatMap((s) => s.weeks);
@@ -146,6 +149,7 @@ export function computeContributorMetrics(
     commits365d: commitsInWindow(allWeeks, from365, nowSec + WEEK_SECONDS),
     commitsPrev90d: commitsInWindow(allWeeks, fromPrev90, from90),
     activeWeeks365d: countRepositoryActiveWeeks(allWeeks, from365),
+    source: "github_stats" as const,
   };
 
   return { contributors, activity };
@@ -176,6 +180,25 @@ export function computeActivityFromCommitWeeks(
     commits365d: commitsInWindow(weeks, nowSec - 365 * 86_400, upper),
     commitsPrev90d: commitsInWindow(weeks, nowSec - 180 * 86_400, nowSec - 90 * 86_400),
     activeWeeks365d: countRepositoryActiveWeeks(weeks, nowSec - 365 * 86_400),
+    source: "github_commit_activity",
+  };
+}
+
+/**
+ * Activity from the ecosyste.ms aggregation — the last resort when GitHub's
+ * statistics are unavailable. It carries a past-year commit total and nothing
+ * shorter, so the 30/90-day windows and the active-week count stay null.
+ */
+export function activityFromAggregation(
+  aggregation: CommitAggregation,
+): Omit<ActivityMetrics, "lastCommitAt"> {
+  return {
+    commits30d: null,
+    commits90d: null,
+    commits365d: aggregation.pastYearCommits,
+    commitsPrev90d: null,
+    activeWeeks365d: null,
+    source: "ecosystems_commits",
   };
 }
 
@@ -185,3 +208,120 @@ export function daysSince(iso: string | null, now: Date): number | null {
   if (Number.isNaN(then)) return null;
   return Math.max(0, (now.getTime() - then) / DAY_MS);
 }
+
+/**
+ * Contributor metrics from the ecosyste.ms commit aggregation.
+ *
+ * This is the path taken for most repositories, because GitHub's per-contributor
+ * weekly statistics are too large to parse for anything sizeable (see
+ * `sources/ecosystems-commits.ts`). The window here is the past year, so:
+ *
+ * - `active90d` is null: the source has no 90-day window. Reported as N/A
+ *   rather than substituted with the 365-day figure.
+ * - The repeat rule (spec 6.3) can only apply its commit-count branch, not the
+ *   active-weeks branch.
+ * - Core Maintainer (spec 6.5) applies the commit threshold only; the
+ *   active-weeks condition is unavailable, which is recorded in
+ *   `coreMaintainersPartial` so the UI can say so rather than imply the full
+ *   definition was met.
+ */
+export function computeContributorMetricsFromCommitters(
+  aggregation: CommitAggregation,
+  githubBots: ReadonlySet<string>,
+): { contributors: ContributorMetrics; coreMaintainersPartial: boolean } {
+  const classified = aggregation.pastYear.map((committer) => {
+    const handle = committer.login ?? committer.name ?? "";
+    // A resolved login can be checked against GitHub's own account type when
+    // the cheap statistics call happened to succeed.
+    const type =
+      committer.login && githubBots.has(committer.login.toLowerCase())
+        ? ("BOT" as ContributorType)
+        : classifyCommitter(committer);
+    return { committer, type };
+  });
+
+  const humans = classified.filter((c) => c.type === "HUMAN_OR_UNKNOWN");
+  const humanCommits = humans.map((c) => c.committer.commits).sort((a, b) => b - a);
+  const humanTotal = humanCommits.reduce((sum, n) => sum + n, 0);
+  const shareOfTop = (n: number): number | null => {
+    if (humanTotal <= 0) return null;
+    return humanCommits.slice(0, n).reduce((sum, c) => sum + c, 0) / humanTotal;
+  };
+
+  const repeat = classified.filter(
+    (c) => c.committer.commits >= CONTRIBUTOR_RULES.repeatMinCommits,
+  );
+  const effective = repeat.filter((c) => c.type === "HUMAN_OR_UNKNOWN");
+  const core = classified.filter(
+    (c) =>
+      c.type === "HUMAN_OR_UNKNOWN" &&
+      c.committer.commits >= CONTRIBUTOR_RULES.coreMinCommits,
+  );
+  const oneShot = humans.filter((c) => c.committer.commits === 1).length;
+
+  return {
+    coreMaintainersPartial: true,
+    contributors: {
+      rawContributors: aggregation.totalCommitters ?? aggregation.committers.length,
+      active90d: null,
+      active365d: classified.length,
+      repeat365d: repeat.length,
+      effectiveContributors: effective.length,
+      coreMaintainers: core.length,
+      botContributors: classified.filter((c) => c.type === "BOT").length,
+      knownAiAgents: classified.filter((c) => c.type === "KNOWN_AI_AGENT").length,
+      humanUnknown: humans.length,
+      oneShotRatio: humans.length > 0 ? oneShot / humans.length : null,
+      top1Share: shareOfTop(1),
+      top3Share: shareOfTop(3),
+      top5Share: shareOfTop(5),
+      source: "ecosystems_commits",
+      coreMaintainersPartial: true,
+    },
+  };
+}
+
+/**
+ * Classifies a committer that has no GitHub account type attached.
+ *
+ * Commit-author names carry weaker signals than an account, so this stays
+ * conservative: only the `[bot]` marker, the known lists, and noreply bot email
+ * domains count. An unrecognised name is HUMAN_OR_UNKNOWN.
+ */
+export function classifyCommitter(committer: {
+  login: string | null;
+  name: string | null;
+  email: string | null;
+}): ContributorType {
+  const candidates = [committer.login, committer.name]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .map((v) => v.toLowerCase());
+
+  for (const candidate of candidates) {
+    const bare = candidate.replace(/\[bot\]$/, "").trim();
+    if (KNOWN_AI_AGENT_LOGINS.includes(bare)) return "KNOWN_AI_AGENT";
+  }
+  for (const candidate of candidates) {
+    const bare = candidate.replace(/\[bot\]$/, "").trim();
+    if (candidate.endsWith("[bot]")) return "BOT";
+    if (KNOWN_BOT_LOGINS.includes(bare)) return "BOT";
+  }
+
+  const email = committer.email?.toLowerCase() ?? "";
+  if (email.endsWith("@users.noreply.github.com") && email.includes("[bot]")) return "BOT";
+  if (BOT_EMAIL_LOCALPARTS.some((local) => email.startsWith(`${local}@`))) return "BOT";
+
+  return "HUMAN_OR_UNKNOWN";
+}
+
+/** Local-parts that identify automation in commit metadata. */
+const BOT_EMAIL_LOCALPARTS = [
+  "action",
+  "actions",
+  "bot",
+  "ci",
+  "dependabot",
+  "github-actions",
+  "noreply+dependabot",
+  "renovate",
+];

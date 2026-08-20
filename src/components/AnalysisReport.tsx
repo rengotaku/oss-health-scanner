@@ -313,14 +313,29 @@ function CommunityPanel({ payload }: { payload: AnalysisPayload }) {
   const band = concentrationBand(c?.top3Share ?? null);
 
   return (
-    <Panel title="Community" hint="GitHub contributor statistics">
+    <Panel
+      title="Community"
+      hint={
+        c?.source === "ecosystems_commits"
+          ? "commits.ecosyste.ms（過去1年の集約）"
+          : "GitHub contributor statistics"
+      }
+    >
       {!c ? (
         <p className="note">Contributor details are still unavailable.</p>
       ) : (
         <>
           <div className="rows">
             <Row label="Raw Contributors" value={intFmt(c.rawContributors)} muted />
-            <Row label="Active Contributors (90d)" value={intFmt(c.active90d)} />
+            <Row
+              label="Active Contributors (90d)"
+              value={intFmt(c.active90d)}
+              hint={
+                c.active90d === null
+                  ? "この Repository の Contributor 指標は過去1年の集約値から算出しており、90日窓を持ちません（GitHub の週次統計は Repository が大きいと数十 MB になり取得できないため）。未取得であって 0 ではありません。"
+                  : undefined
+              }
+            />
             <Row label="Repeat Contributors (365d)" value={intFmt(c.repeat365d)} />
             <Row
               label="Effective Contributors"
@@ -331,7 +346,11 @@ function CommunityPanel({ payload }: { payload: AnalysisPayload }) {
             <Row
               label="Core Maintainers"
               value={intFmt(c.coreMaintainers)}
-              hint="直近1年で 5 commit 以上かつ 3 週以上活動している人間の Contributor（暫定閾値）。"
+              hint={
+                c.coreMaintainersPartial
+                  ? "本来は「直近1年で 5 commit 以上かつ 3 週以上活動」で判定しますが、この Repository では活動週が取得できず Commit 数のみで判定しています。"
+                  : "直近1年で 5 commit 以上かつ 3 週以上活動している人間の Contributor（暫定閾値）。"
+              }
             />
             <Row label="Bot Contributors" value={intFmt(c.botContributors)} muted />
             <Row
@@ -369,10 +388,19 @@ function CommunityPanel({ payload }: { payload: AnalysisPayload }) {
 function ActivityPanel({ payload }: { payload: AnalysisPayload }) {
   const a = payload.activity;
   const trend =
-    a && a.commitsPrev90d > 0 ? a.commits90d / a.commitsPrev90d : null;
+    a && a.commitsPrev90d !== null && a.commitsPrev90d > 0 && a.commits90d !== null
+      ? a.commits90d / a.commitsPrev90d
+      : null;
 
   return (
-    <Panel title="Activity" hint="GitHub weekly statistics">
+    <Panel
+      title="Activity"
+      hint={
+        a?.source === "ecosystems_commits"
+          ? "commits.ecosyste.ms（過去1年の合計のみ）"
+          : "GitHub weekly statistics"
+      }
+    >
       {!a ? (
         <p className="note">Activity metrics are still unavailable.</p>
       ) : (
@@ -382,7 +410,15 @@ function ActivityPanel({ payload }: { payload: AnalysisPayload }) {
             <Row label="Commits / 30d" value={intFmt(a.commits30d)} />
             <Row label="Commits / 90d" value={intFmt(a.commits90d)} />
             <Row label="Commits / 365d" value={intFmt(a.commits365d)} />
-            <Row label="Active weeks / 1y" value={`${a.activeWeeks365d} / 52`} />
+            <Row
+              label="Active weeks / 1y"
+              value={a.activeWeeks365d === null ? null : `${a.activeWeeks365d} / 52`}
+              hint={
+                a.activeWeeks365d === null
+                  ? "GitHub の週次統計が生成中（202 Accepted）のため未取得です。0 週ではありません。"
+                  : undefined
+              }
+            />
             <Row
               label="Activity trend (90d vs 前90d)"
               value={trend === null ? null : `${trend.toFixed(2)}×`}
@@ -391,10 +427,12 @@ function ActivityPanel({ payload }: { payload: AnalysisPayload }) {
             />
             <Row label="90d contributors" value={intFmt(payload.contributors?.active90d)} />
           </div>
-          <Sparkline
-            values={[a.commitsPrev90d, a.commits90d]}
-            labels={["前90日", "直近90日"]}
-          />
+          {a.commitsPrev90d !== null && a.commits90d !== null && (
+            <Sparkline
+              values={[a.commitsPrev90d, a.commits90d]}
+              labels={["前90日", "直近90日"]}
+            />
+          )}
         </>
       )}
     </Panel>
@@ -430,6 +468,8 @@ function SecurityPanel({ payload }: { payload: AnalysisPayload }) {
   const s = payload.security;
   const checkTone = (score: number | null) =>
     score === null ? undefined : score >= 8 ? "good" : score >= 5 ? "warn" : "bad";
+  // A null score is an inconclusive check (OpenSSF reports -1); it renders as
+  // N/A rather than as a verdict.
   const checkLabel = (score: number | null) =>
     score === null ? null : score >= 8 ? "Good" : score >= 5 ? "Caution" : "Weak";
 
@@ -445,8 +485,7 @@ function SecurityPanel({ payload }: { payload: AnalysisPayload }) {
           <Row label="Reason" value="OpenSSF Scorecard data unavailable" muted />
         )}
         {(s?.openssfChecks ?? [])
-          .filter((check) => check.score !== null)
-          .slice(0, 8)
+          .slice(0, 10)
           .map((check) => (
             <Row
               key={check.name}
@@ -539,6 +578,7 @@ function FreshnessPanel({ payload }: { payload: AnalysisPayload }) {
         <Row label="GitHub" value={agoFmt(f.github)} />
         <Row label="ecosyste.ms" value={agoFmt(f.ecosystems)} />
         <Row label="OpenSSF" value={agoFmt(f.openssf)} />
+        <Row label="commits.ecosyste.ms" value={agoFmt(f.ecosystems)} muted />
         <Row label="deps.dev" value={agoFmt(f.deps_dev)} muted />
         <Row label="Score calculated" value={agoFmt(f.score)} emphasis />
       </div>

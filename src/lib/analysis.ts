@@ -1,13 +1,16 @@
 import { CONTRIBUTOR_RULES, GITHUB_REQUEST_BUDGET } from "./config";
 import { CircuitOpenError, TimeoutError } from "./http";
 import {
+  activityFromAggregation,
   computeActivityFromCommitWeeks,
   computeContributorMetrics,
+  computeContributorMetricsFromCommitters,
 } from "./metrics/contributors";
 import { computeReleaseMetrics } from "./metrics/release";
 import { computeScore } from "./score";
 import { resolvePackageMapping } from "./sources/depsdev";
 import { fetchIssuePrMetrics } from "./sources/ecosystems";
+import { fetchCommitAggregation } from "./sources/ecosystems-commits";
 import {
   GithubClient,
   GithubRateLimitedError,
@@ -27,6 +30,7 @@ import {
 } from "./store";
 import type {
   ActivityMetrics,
+  Diagnostics,
   AnalysisRecord,
   ContributorMetrics,
   Freshness,
@@ -98,6 +102,12 @@ export async function startAnalysis(args: {
           scores: null,
           freshness: { github: fetchedAt },
           unavailable: ["ecosystems", "openssf", "deps_dev"],
+          diagnostics: {
+            health_stage: {
+              outcome: "error",
+              detail: error instanceof Error ? `${error.name}: ${error.message}` : "unknown",
+            },
+          },
           completedAt: new Date().toISOString(),
         }).catch(() => undefined);
         console.error("health stage failed", { analysisId, error });
@@ -129,52 +139,145 @@ async function runHealthStage(args: HealthStageArgs): Promise<void> {
   const now = new Date();
   const freshness: Freshness = { github: args.githubFetchedAt };
   const unavailable: SourceName[] = [];
+  const diagnostics: Diagnostics = {};
+
+  const note = (
+    source: string,
+    settled: PromiseSettledResult<unknown>,
+    outcome: "ok" | "empty" | "pending" | "too_large" = "ok",
+  ): void => {
+    diagnostics[source] =
+      settled.status === "rejected"
+        ? {
+            outcome: "error",
+            detail:
+              settled.reason instanceof Error
+                ? `${settled.reason.name}: ${settled.reason.message}`
+                : String(settled.reason),
+          }
+        : { outcome };
+  };
 
   await setAnalysisStatus(db, analysisId, "FETCHING_ACTIVITY");
   await heartbeatLock(db, analysisId, Date.now());
 
-  const [statsResult, releasesResult, issuePrResult, scorecardResult, mappingResult] =
-    await Promise.allSettled([
-      github.getContributorStats(ref),
-      github.getReleases(ref, CONTRIBUTOR_RULES.releaseSampleSize + 4),
-      fetchIssuePrMetrics(ref),
-      fetchScorecard(ref),
-      resolvePackageMapping(ref),
-    ]);
+  const [
+    commitAggResult,
+    commitActivityResult,
+    statsResult,
+    releasesResult,
+    issuePrResult,
+    scorecardResult,
+    mappingResult,
+  ] = await Promise.allSettled([
+    // Primary contributor source: pre-aggregated, bounded in size.
+    fetchCommitAggregation(ref),
+    // Repository-level weekly commit totals: ~2 KB regardless of repo size.
+    github.getCommitActivity(ref),
+    // Higher-fidelity contributor data, used only if it is cheap to read.
+    github.getContributorStats(ref),
+    github.getReleases(ref, CONTRIBUTOR_RULES.releaseSampleSize + 4),
+    fetchIssuePrMetrics(ref),
+    fetchScorecard(ref),
+    resolvePackageMapping(ref),
+  ]);
 
   await setAnalysisStatus(db, analysisId, "FETCHING_SECURITY");
   await heartbeatLock(db, analysisId, Date.now());
 
-  // ---- Contributors and activity (GitHub statistics) ----
-  let contributors: ContributorMetrics | null = null;
+  note("ecosystems_commits", commitAggResult,
+    commitAggResult.status === "fulfilled" && commitAggResult.value === null ? "empty" : "ok");
+  note("github_commit_activity", commitActivityResult,
+    commitActivityResult.status === "fulfilled" && commitActivityResult.value.weeks === null
+      ? "pending"
+      : "ok");
+  note("github_contributor_stats", statsResult,
+    statsResult.status === "fulfilled"
+      ? statsResult.value.tooLarge
+        ? "too_large"
+        : statsResult.value.pending
+          ? "pending"
+          : "ok"
+      : "ok");
+  note("github_releases", releasesResult);
+  note("ecosystems_issues", issuePrResult,
+    issuePrResult.status === "fulfilled" && issuePrResult.value === null ? "empty" : "ok");
+  note("openssf", scorecardResult,
+    scorecardResult.status === "fulfilled" && scorecardResult.value === null ? "empty" : "ok");
+  note("deps_dev", mappingResult,
+    mappingResult.status === "fulfilled" && !mappingResult.value.confident ? "empty" : "ok");
+  if (mappingResult.status === "fulfilled" && !mappingResult.value.confident) {
+    diagnostics.deps_dev = { outcome: "empty", detail: mappingResult.value.reason };
+  }
+
+  // ---- Activity (repository level) ----
   let activity: ActivityMetrics | null = null;
+  if (commitActivityResult.status === "fulfilled" && commitActivityResult.value.weeks) {
+    activity = {
+      ...computeActivityFromCommitWeeks(commitActivityResult.value.weeks, now),
+      lastCommitAt: basic.pushedAt,
+    };
+    freshness.github = commitActivityResult.value.fetchedAt;
+  } else if (commitActivityResult.status === "rejected") {
+    logSourceFailure("github commit_activity", commitActivityResult.reason);
+  }
+
+  // ---- Contributors ----
+  let contributors: ContributorMetrics | null = null;
+  let statsTooLarge = false;
   let statsPending = false;
 
-  if (statsResult.status === "fulfilled" && statsResult.value.stats) {
-    const computed = computeContributorMetrics(statsResult.value.stats, now);
-    contributors = computed.contributors;
-    activity = { ...computed.activity, lastCommitAt: basic.pushedAt };
-    freshness.github = statsResult.value.fetchedAt;
+  if (statsResult.status === "fulfilled") {
+    statsTooLarge = statsResult.value.tooLarge;
+    statsPending = statsResult.value.pending;
+    if (statsResult.value.stats) {
+      // Full fidelity: weekly buckets and GitHub account types.
+      const computed = computeContributorMetrics(statsResult.value.stats, now);
+      contributors = computed.contributors;
+      // These weekly figures are per-contributor and therefore more precise
+      // than the repository-level fallback, so they win when both exist.
+      activity = { ...computed.activity, lastCommitAt: basic.pushedAt };
+      freshness.github = statsResult.value.fetchedAt;
+    }
+    if (statsTooLarge) {
+      console.warn("github stats/contributors too large; using ecosyste.ms commits", {
+        analysisId,
+        bytes: statsResult.value.bytes,
+      });
+    }
   } else {
-    statsPending = statsResult.status === "fulfilled" && statsResult.value.pending;
-    // Statistics still generating: fall back to repository-wide commit activity
-    // so the Activity card is not empty, while contributor metrics stay null.
-    if (statsPending && github.usage.requests < GITHUB_REQUEST_BUDGET.hardCap) {
-      try {
-        const fallback = await github.getCommitActivity(ref);
-        if (fallback.weeks) {
-          activity = {
-            ...computeActivityFromCommitWeeks(fallback.weeks, now),
-            lastCommitAt: basic.pushedAt,
-          };
-        }
-      } catch {
-        // Fallback is best-effort by definition.
-      }
-    }
-    if (!statsPending && statsResult.status === "rejected") {
-      logSourceFailure("github stats", statsResult.reason);
-    }
+    logSourceFailure("github stats/contributors", statsResult.reason);
+  }
+
+  const aggregation =
+    commitAggResult.status === "fulfilled" ? commitAggResult.value : null;
+  if (commitAggResult.status === "rejected") {
+    logSourceFailure("commits.ecosyste.ms", commitAggResult.reason);
+  }
+
+  if (contributors && aggregation?.totalCommitters !== null && aggregation !== null) {
+    // GitHub's stats/contributors returns only the top 100 contributors, so its
+    // "raw" count silently saturates at 100 — measured 2026-08-20, 8 of 30
+    // well-known repositories reported exactly 100 while ecosyste.ms reported
+    // the real totals (curl 1516, rust-lang/rust 7723). Presenting a capped
+    // figure next to uncapped ones would make the number meaningless, so the
+    // true total wins whenever it is available.
+    contributors = { ...contributors, rawContributors: aggregation.totalCommitters };
+  }
+
+  if (!contributors && aggregation) {
+    // GitHub account types are only available when the statistics call
+    // succeeded; without them classification falls back to commit metadata.
+    const githubBots = new Set<string>();
+    contributors = computeContributorMetricsFromCommitters(aggregation, githubBots).contributors;
+    freshness.ecosystems = aggregation.sourceUpdatedAt ?? aggregation.fetchedAt;
+  }
+
+  // Last resort for activity: a past-year total with no shorter windows beats an
+  // empty Activity card, as long as the missing windows read as N/A.
+  if (!activity && aggregation) {
+    activity = { ...activityFromAggregation(aggregation), lastCommitAt: basic.pushedAt };
+    freshness.ecosystems = aggregation.sourceUpdatedAt ?? aggregation.fetchedAt;
   }
 
   // ---- Releases ----
@@ -225,6 +328,9 @@ async function runHealthStage(args: HealthStageArgs): Promise<void> {
     freshness.deps_dev = mappingResult.value.fetchedAt;
   } else {
     unavailable.push("deps_dev");
+    if (mappingResult.status === "rejected") {
+      logSourceFailure("deps.dev", mappingResult.reason);
+    }
   }
 
   await setAnalysisStatus(db, analysisId, "SCORING");
@@ -238,10 +344,21 @@ async function runHealthStage(args: HealthStageArgs): Promise<void> {
     security,
     now,
   });
-  if (statsPending) {
+  if (contributors === null) {
     scores.headlineSignals.unshift({
       type: "info",
-      text: "Contributor details are still unavailable.（GitHub の統計生成待ち）",
+      text: statsPending
+        ? "Contributor details are still unavailable.（GitHub の統計生成待ち）"
+        : "Contributor details are still unavailable.",
+    });
+  } else if (contributors.source === "ecosystems_commits") {
+    // The reader has to know the 90-day figure is absent by source, not by
+    // failure, otherwise an N/A looks like a bug.
+    scores.headlineSignals.push({
+      type: "info",
+      text: statsTooLarge
+        ? "Contributor 指標は ecosyste.ms の集約値（GitHub の週次統計は大きすぎるため未使用）。90日窓は N/A"
+        : "Contributor 指標は ecosyste.ms の集約値。90日窓は N/A",
     });
   }
 
@@ -263,9 +380,18 @@ async function runHealthStage(args: HealthStageArgs): Promise<void> {
     },
   });
 
-  const status = unavailable.length > 0 || statsPending || contributors === null
-    ? "PARTIAL"
-    : "COMPLETE";
+  // PARTIAL means "some data the reader might expect is missing", which covers a
+  // failed source, pending GitHub statistics, and the reduced-fidelity
+  // contributor path where the 90-day window is unavailable.
+  const status =
+    unavailable.length > 0 ||
+    statsPending ||
+    contributors === null ||
+    contributors.source === "ecosystems_commits" ||
+    activity === null ||
+    activity.activeWeeks365d === null
+      ? "PARTIAL"
+      : "COMPLETE";
 
   await finishAnalysis(db, {
     analysisId,
@@ -273,7 +399,17 @@ async function runHealthStage(args: HealthStageArgs): Promise<void> {
     scores,
     freshness,
     unavailable,
+    diagnostics,
     completedAt,
+  });
+
+  console.info("analysis complete", {
+    analysisId,
+    status,
+    githubRequests: github.usage.requests,
+    contributorSource: contributors?.source ?? null,
+    activitySource: activity?.source ?? null,
+    unavailable,
   });
 
   await bumpCounters(
