@@ -193,7 +193,8 @@ Contributor 指標を ecosyste.ms（GitHub の quota を消費しない）に寄
 - **PARTIAL 率 82%**。大半は「Contributor 指標が ecosyste.ms 経路（90日窓なし）」か
   「GitHub 統計が 202」で、障害ではない。PARTIAL が常態なので、この状態を「一部欠損」以上の
   意味に使わないこと
-- Score の分布は 40〜88（`algorithm_version` 0.2.0 時点）
+- Score の分布は 40〜88（30 件全体を測ったのは `algorithm_version` 0.2.0 時点。0.3.0 の
+  変更は下記 6 件の抜き取りでのみ実測している）
 
 ### Release Health の校正（適用済み・`algorithm_version` 0.1.0 → 0.2.0）
 
@@ -244,7 +245,48 @@ Contributor 指標を ecosyste.ms（GitHub の quota を消費しない）に寄
 | Release score 後 | **2 / 24** | 12 | 80.8 |
 
 総合 Health Score は平均 72.5 → 75.2、レンジ 40〜91 → 40〜88。スコア式が変わったため
-`algorithm_version` を **0.2.0** に上げてある（0.1.0 の値と混ぜて比較しないこと）。
+`algorithm_version` を **0.2.0** に上げた。
+
+### Community Resilience の校正（適用済み・`algorithm_version` 0.2.0 → 0.3.0）
+
+`chalk/ansi-styles` の表示が実感と合わないという指摘から実データを見ると、この Repository の
+Community 系の値はすべて**直近1年の commit 6 件**から計算されていた。
+
+```
+commits365d  6      ← 分母
+top1Share    0.667  ← 6 件中 4 件を「67%」として提示
+top3Share    1.000  ← 3 人しか commit していないので必ず 100%
+community    24     ← 総合を 53 / Caution まで引き下げていた
+```
+
+比率ではなく標本数の言い換えを比率として出していた。仕様書 §8.3 は「Contributor が1〜2人の
+小規模 OSS では事実表示に留める」、§11.2 は「小規模 OSS を極端に不利にしない」と書いているが、
+実装は両方を点数に算入していた。
+
+判定の切り分けは**人数ではなく commit の標本数**にした。`sqlite/sqlite` は 1,897 commit を
+4 人で書いており、その 100% 集中は本物の所見なので残す必要がある。
+
+- 直近1年の人間 commit が `MIN_COMMITS_FOR_COMMUNITY`（20）件未満のとき Top1/3/5 share を N/A にする
+- 同条件で Community Resilience 自体を N/A にし、weight を再正規化して coverage を落とす
+  （Release Health / Security の欠損と同じ扱い）
+- 件数（実効 Contributor 数・Core Maintainer 数）は従来どおり表示する。伏せるのはスコアだけ
+- 分母（`直近1年の Commit（人間のみ）`）と N/A の理由を画面に出す
+
+実測（2026-08-20、6 件の抜き取り）:
+
+| repository | c365 | top1 | top3 | community | 総合 | coverage |
+|---|---|---|---|---|---|---|
+| chalk/ansi-styles | 6 | N/A | N/A | N/A | 53 → **62** | 75% |
+| chalk/chalk | 10 | N/A | N/A | N/A | 64 → 68 | 75% |
+| sindresorhus/slugify | 4 | N/A | N/A | N/A | 40 | 75% |
+| moment/moment | 28 | 100% | 100% | 46 | 58 | 85% |
+| sqlite/sqlite | 1,897 | 61% | 100% | 66 | 72 | 85% |
+| kubernetes/kubernetes | 5,355 | 6% | 14% | 89 | 86 | 100% |
+
+`moment`（28 commit を1人）と `sqlite`（1,897 commit を4人）は引き続き採点される。本物の
+bus factor 1 を抑制しないことを回帰テストで固定してある。
+
+`algorithm_version` は版をまたいで比較しないこと（0.1.0 / 0.2.0 / 0.3.0 のスコアは互換ではない）。
 
 ## API
 
@@ -261,5 +303,5 @@ LLM / Chat / OSS 自然言語検索 / Recommendation / 全 GitHub Crawler / 定�
 Private Repository / User Account / Billing / Repository 比較 / 通知 / GitLab /
 AI コード検出 / Source Code 品質解析 / SBOM 生成 / 独自 Vulnerability scanner。
 
-Scoring model のバージョンは analysis に保存される（現在 `0.1.0`）。閾値は実データを見て
+Scoring model のバージョンは analysis に保存される（現在 `0.3.0`）。閾値は実データを見て
 調整する前提で、すべて `src/lib/config.ts` に集約してある。
